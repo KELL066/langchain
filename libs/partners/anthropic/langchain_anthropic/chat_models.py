@@ -282,7 +282,6 @@ def _format_messages(
     """
     system: Union[str, list[dict], None] = None
     formatted_messages: list[dict] = []
-
     merged_messages = _merge_messages(messages)
     for i, message in enumerate(merged_messages):
         if message.type == "system":
@@ -408,6 +407,16 @@ def _format_messages(
 
         formatted_messages.append({"role": role, "content": content})
     return system, formatted_messages
+
+
+def _handle_anthropic_bad_request(e: anthropic.BadRequestError) -> None:
+    """Handle Anthropic BadRequestError."""
+    if ("messages: at least one message is required") in e.message:
+        message = "Received only system message(s). "
+        warnings.warn(message)
+        raise e
+    else:
+        raise
 
 
 class ChatAnthropic(BaseChatModel):
@@ -866,29 +875,46 @@ class ChatAnthropic(BaseChatModel):
         See LangChain `docs <https://python.langchain.com/docs/integrations/chat/anthropic/>`_
         for more detail.
 
-        .. code-block:: python
+        Web search:
 
-            from langchain_anthropic import ChatAnthropic
+            .. code-block:: python
 
-            llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")
+                from langchain_anthropic import ChatAnthropic
 
-            tool = {"type": "text_editor_20250124", "name": "str_replace_editor"}
-            llm_with_tools = llm.bind_tools([tool])
+                llm = ChatAnthropic(model="claude-3-5-sonnet-latest")
 
-            response = llm_with_tools.invoke(
-                "There's a syntax error in my primes.py file. Can you help me fix it?"
-            )
-            print(response.text())
-            response.tool_calls
+                tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+                llm_with_tools = llm.bind_tools([tool])
 
-        .. code-block:: none
+                response = llm_with_tools.invoke(
+                    "How do I update a web app to TypeScript 5.5?"
+                )
 
-            I'd be happy to help you fix the syntax error in your primes.py file. First, let's look at the current content of the file to identify the error.
+        Text editor:
 
-            [{'name': 'str_replace_editor',
-            'args': {'command': 'view', 'path': '/repo/primes.py'},
-            'id': 'toolu_01VdNgt1YV7kGfj9LFLm6HyQ',
-            'type': 'tool_call'}]
+            .. code-block:: python
+
+                from langchain_anthropic import ChatAnthropic
+
+                llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")
+
+                tool = {"type": "text_editor_20250124", "name": "str_replace_editor"}
+                llm_with_tools = llm.bind_tools([tool])
+
+                response = llm_with_tools.invoke(
+                    "There's a syntax error in my primes.py file. Can you help me fix it?"
+                )
+                print(response.text())
+                response.tool_calls
+
+            .. code-block:: none
+
+                I'd be happy to help you fix the syntax error in your primes.py file. First, let's look at the current content of the file to identify the error.
+
+                [{'name': 'str_replace_editor',
+                'args': {'command': 'view', 'path': '/repo/primes.py'},
+                'id': 'toolu_01VdNgt1YV7kGfj9LFLm6HyQ',
+                'type': 'tool_call'}]
 
     Response metadata
         .. code-block:: python
@@ -1094,23 +1120,26 @@ class ChatAnthropic(BaseChatModel):
             stream_usage = self.stream_usage
         kwargs["stream"] = True
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        stream = self._client.messages.create(**payload)
-        coerce_content_to_string = (
-            not _tools_in_params(payload)
-            and not _documents_in_params(payload)
-            and not _thinking_in_params(payload)
-        )
-        for event in stream:
-            msg = _make_message_chunk_from_anthropic_event(
-                event,
-                stream_usage=stream_usage,
-                coerce_content_to_string=coerce_content_to_string,
+        try:
+            stream = self._client.messages.create(**payload)
+            coerce_content_to_string = (
+                not _tools_in_params(payload)
+                and not _documents_in_params(payload)
+                and not _thinking_in_params(payload)
             )
-            if msg is not None:
-                chunk = ChatGenerationChunk(message=msg)
-                if run_manager and isinstance(msg.content, str):
-                    run_manager.on_llm_new_token(msg.content, chunk=chunk)
-                yield chunk
+            for event in stream:
+                msg = _make_message_chunk_from_anthropic_event(
+                    event,
+                    stream_usage=stream_usage,
+                    coerce_content_to_string=coerce_content_to_string,
+                )
+                if msg is not None:
+                    chunk = ChatGenerationChunk(message=msg)
+                    if run_manager and isinstance(msg.content, str):
+                        run_manager.on_llm_new_token(msg.content, chunk=chunk)
+                    yield chunk
+        except anthropic.BadRequestError as e:
+            _handle_anthropic_bad_request(e)
 
     async def _astream(
         self,
@@ -1125,23 +1154,26 @@ class ChatAnthropic(BaseChatModel):
             stream_usage = self.stream_usage
         kwargs["stream"] = True
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        stream = await self._async_client.messages.create(**payload)
-        coerce_content_to_string = (
-            not _tools_in_params(payload)
-            and not _documents_in_params(payload)
-            and not _thinking_in_params(payload)
-        )
-        async for event in stream:
-            msg = _make_message_chunk_from_anthropic_event(
-                event,
-                stream_usage=stream_usage,
-                coerce_content_to_string=coerce_content_to_string,
+        try:
+            stream = await self._async_client.messages.create(**payload)
+            coerce_content_to_string = (
+                not _tools_in_params(payload)
+                and not _documents_in_params(payload)
+                and not _thinking_in_params(payload)
             )
-            if msg is not None:
-                chunk = ChatGenerationChunk(message=msg)
-                if run_manager and isinstance(msg.content, str):
-                    await run_manager.on_llm_new_token(msg.content, chunk=chunk)
-                yield chunk
+            async for event in stream:
+                msg = _make_message_chunk_from_anthropic_event(
+                    event,
+                    stream_usage=stream_usage,
+                    coerce_content_to_string=coerce_content_to_string,
+                )
+                if msg is not None:
+                    chunk = ChatGenerationChunk(message=msg)
+                    if run_manager and isinstance(msg.content, str):
+                        await run_manager.on_llm_new_token(msg.content, chunk=chunk)
+                    yield chunk
+        except anthropic.BadRequestError as e:
+            _handle_anthropic_bad_request(e)
 
     def _format_output(self, data: Any, **kwargs: Any) -> ChatResult:
         data_dict = data.model_dump()
@@ -1201,7 +1233,10 @@ class ChatAnthropic(BaseChatModel):
             )
             return generate_from_stream(stream_iter)
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        data = self._client.messages.create(**payload)
+        try:
+            data = self._client.messages.create(**payload)
+        except anthropic.BadRequestError as e:
+            _handle_anthropic_bad_request(e)
         return self._format_output(data, **kwargs)
 
     async def _agenerate(
@@ -1217,7 +1252,10 @@ class ChatAnthropic(BaseChatModel):
             )
             return await agenerate_from_stream(stream_iter)
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        data = await self._async_client.messages.create(**payload)
+        try:
+            data = await self._async_client.messages.create(**payload)
+        except anthropic.BadRequestError as e:
+            _handle_anthropic_bad_request(e)
         return self._format_output(data, **kwargs)
 
     def _get_llm_for_structured_output_when_thinking_is_enabled(
